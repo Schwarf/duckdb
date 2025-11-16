@@ -1,8 +1,6 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/type_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
-#include "duckdb/common/exception.hpp"
-#include "duckdb/common/limits.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 #include <algorithm>
 #include <sstream>
