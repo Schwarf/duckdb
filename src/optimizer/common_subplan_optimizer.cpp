@@ -35,6 +35,11 @@ public:
 		return GetMap<TYPE>().empty();
 	}
 
+	template <ConversionType TYPE>
+	bool Contains(const ProjectionIndex index) const {
+		return GetMap<TYPE>().find(index) != GetMap<TYPE>().end();
+	}
+
 	void Insert(const ProjectionIndex original, const ProjectionIndex canonical) {
 		D_ASSERT(to_canonical.find(original) == to_canonical.end());
 		D_ASSERT(restore_original.find(canonical) == restore_original.end());
@@ -318,10 +323,28 @@ private:
 		});
 		if (op.type == LogicalOperatorType::LOGICAL_GET) {
 			auto &get = op.Cast<LogicalGet>();
+			const auto lookup_idx = TYPE == ConversionType::TO_CANONICAL ? table_indices[0] : get.table_index;
+			auto &table_map = table_index_map.at(lookup_idx);
+			vector<pair<ProjectionIndex, unique_ptr<TableFilter>>> converted_filters;
 			for (auto &entry : get.table_filters) {
 				auto &expression_filter =
 				    ExpressionFilter::GetExpressionFilter(entry.Filter(), "CommonSubplanOptimizer::ConvertExpressions");
 				ConvertExpression<TYPE>(*expression_filter.expr, info_idx, can_materialize);
+				auto filter_index = entry.GetIndex();
+				if (!table_map.Empty<TYPE>()) {
+					if (table_map.Contains<TYPE>(filter_index)) {
+						filter_index = table_map.Get<TYPE>(filter_index);
+					} else {
+						can_materialize = false;
+					}
+				}
+				converted_filters.emplace_back(filter_index, entry.TakeFilter());
+			}
+			if (!converted_filters.empty()) {
+				get.table_filters.ClearFilters();
+				for (auto &entry : converted_filters) {
+					get.table_filters.SetFilterByColumnIndex(entry.first, std::move(entry.second));
+				}
 			}
 		}
 		return can_materialize;
@@ -335,16 +358,26 @@ private:
 		// Replace column binding
 		if (expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
 			auto &col_ref = expr.Cast<BoundColumnRefExpression>();
-			const auto lookup_idx = TYPE == ConversionType::TO_CANONICAL
-			                            ? col_ref.Binding().table_index
-			                            : restore_original_table_index.at(col_ref.Binding().table_index);
-			auto &table_map = table_index_map.at(lookup_idx);
-			if (!table_map.Empty<TYPE>()) {
-				// Replace column index
-				col_ref.BindingMutable().column_index = table_map.Get<TYPE>(col_ref.Binding().column_index);
+			if (table_index_mapping.find(col_ref.Binding().table_index) == table_index_mapping.end()) {
+				can_materialize = false;
+			} else {
+				bool convert_table_index = true;
+				const auto lookup_idx = TYPE == ConversionType::TO_CANONICAL
+				                            ? col_ref.Binding().table_index
+				                            : restore_original_table_index.at(col_ref.Binding().table_index);
+				auto &table_map = table_index_map.at(lookup_idx);
+				if (!table_map.Empty<TYPE>()) {
+					if (table_map.Contains<TYPE>(col_ref.Binding().column_index)) {
+						col_ref.BindingMutable().column_index = table_map.Get<TYPE>(col_ref.Binding().column_index);
+					} else {
+						can_materialize = false;
+						convert_table_index = false;
+					}
+				}
+				if (convert_table_index) {
+					col_ref.BindingMutable().table_index = table_index_mapping.at(col_ref.Binding().table_index);
+				}
 			}
-			// Replace table index
-			col_ref.BindingMutable().table_index = table_index_mapping.at(col_ref.Binding().table_index);
 		}
 
 		// Replace default fields
